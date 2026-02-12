@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Stock Screener Pro | 日本株スクリーニング</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>"/>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#070b12;color:#e2e8f0;font-family:'Noto Sans JP','Helvetica Neue',sans-serif;min-height:100vh}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#070b12}::-webkit-scrollbar-thumb{background:#1e293b;border-radius:3px}
+select,input{outline:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+
+/* ═══ J-Quants API Client (V1 Token / V2 API Key) ═══ */
+const API_V1 = "https://api.jquants.com/v1";
+const API_V2 = "https://api.jquants.com/v2";
+
+class JQuantsClient {
+  constructor(){ this.idToken=null; this.apiKey=null; this.ver=null; }
+  configV2(k){ this.apiKey=k; this.ver="v2"; this.idToken=null; }
+  async configV1(email,pw){
+    this.ver="v1"; this.apiKey=null;
+    const r1=await fetch(`${API_V1}/token/auth_user`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mailaddress:email,password:pw})});
+    if(!r1.ok) throw new Error(`認証失敗(${r1.status})`);
+    const {refreshToken}=await r1.json();
+    const r2=await fetch(`${API_V1}/token/auth_refresh?refreshtoken=${refreshToken}`,{method:"POST"});
+    if(!r2.ok) throw new Error(`IDトークン取得失敗(${r2.status})`);
+    const d=await r2.json(); this.idToken=d.idToken||d.IdToken;
+  }
+  _h(){ return this.ver==="v2"?{"x-api-key":this.apiKey}:{Authorization:`Bearer ${this.idToken}`}; }
+  _b(){ return this.ver==="v2"?API_V2:API_V1; }
+  ok(){ return(this.ver==="v2"&&this.apiKey)||(this.ver==="v1"&&this.idToken); }
+  async _get(p,q={}){ const qs=new URLSearchParams(q).toString(); const r=await fetch(`${this._b()}${p}${qs?"?"+qs:""}`,{headers:this._h()}); if(!r.ok) throw new Error(`API Error ${r.status}`); return r.json(); }
+  async getList(c){ return this._get("/listed/info",c?{code:c}:{}); }
+  async getQuotes(c,f,t){ return this._get(this.ver==="v2"?"/equities/bars/daily":"/prices/daily_quotes",{code:c,from:f,to:t}); }
+  async getFin(c){ return this._get(this.ver==="v2"?"/fins/summary":"/fins/statements",{code:c}); }
+}
+const jqC = new JQuantsClient();
+
+/* ═══ Local Storage Helper ═══ */
+const LS = {
+  get(k){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):null; }catch{return null;} },
+  set(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch{} }
+};
+
+/* ═══ Sample Data ═══ */
+function gP(base,trend,vol,n=76){
+  const p=[base],v=[];
+  for(let i=1;i<n;i++){p.push(Math.round(p[i-1]*(1+(Math.random()-0.48)*vol+trend)));v.push(Math.round((5+Math.random()*10)*1e6));}
+  v.push(Math.round((5+Math.random()*10)*1e6)); return{prices:p,volumes:v};
+}
+const SAMPLE=[
+  {code:"7203",name:"トヨタ自動車",sector:"輸送用機器",...gP(2680,.003,.015),per:10.2,pbr:1.08,roe:10.6,divYield:2.8,equityRatio:42,opMargin:8.5,earningsGr:12.1,consDiv:5,esgE:68,esgS:74,esgG:75,marketCap:42000},
+  {code:"6758",name:"ソニーグループ",sector:"電気機器",...gP(2950,.004,.018),per:16.8,pbr:2.15,roe:12.8,divYield:0.6,equityRatio:38,opMargin:12.3,earningsGr:8.4,consDiv:2,esgE:75,esgS:80,esgG:79,marketCap:18000},
+  {code:"9984",name:"ソフトバンクG",sector:"情報・通信業",...gP(8200,.006,.025),per:22.5,pbr:1.85,roe:8.2,divYield:0.5,equityRatio:22,opMargin:15.2,earningsGr:25.3,consDiv:0,esgE:52,esgS:60,esgG:62,marketCap:13000},
+  {code:"8306",name:"三菱UFJ FG",sector:"銀行業",...gP(1350,.004,.012),per:11.5,pbr:0.85,roe:7.4,divYield:3.2,equityRatio:5,opMargin:32.1,earningsGr:6.8,consDiv:4,esgE:65,esgS:72,esgG:73,marketCap:21000},
+  {code:"4502",name:"武田薬品工業",sector:"医薬品",...gP(4300,-.003,.012),per:28.5,pbr:1.12,roe:3.9,divYield:4.4,equityRatio:48,opMargin:14.8,earningsGr:-2.1,consDiv:12,esgE:80,esgS:85,esgG:81,marketCap:7200},
+  {code:"6861",name:"キーエンス",sector:"電気機器",...gP(62000,.004,.016),per:42.5,pbr:8.5,roe:20.0,divYield:0.3,equityRatio:94,opMargin:55.2,earningsGr:15.6,consDiv:8,esgE:60,esgS:68,esgG:67,marketCap:16000},
+  {code:"8058",name:"三菱商事",sector:"卸売業",...gP(2500,.004,.014),per:9.8,pbr:1.1,roe:11.2,divYield:3.5,equityRatio:35,opMargin:6.8,earningsGr:5.5,consDiv:7,esgE:72,esgS:70,esgG:76,marketCap:11000},
+  {code:"6501",name:"日立製作所",sector:"電気機器",...gP(3800,.004,.015),per:18.5,pbr:2.8,roe:15.1,divYield:1.2,equityRatio:32,opMargin:9.8,earningsGr:18.2,consDiv:3,esgE:78,esgS:76,esgG:80,marketCap:15000},
+  {code:"9432",name:"日本電信電話",sector:"情報・通信業",...gP(155,.003,.01),per:12.5,pbr:1.5,roe:12.0,divYield:3.0,equityRatio:35,opMargin:16.5,earningsGr:4.2,consDiv:13,esgE:70,esgS:72,esgG:78,marketCap:14000},
+  {code:"7974",name:"任天堂",sector:"その他製品",...gP(8200,.003,.014),per:20.5,pbr:3.2,roe:15.6,divYield:2.5,equityRatio:80,opMargin:35.2,earningsGr:22.0,consDiv:10,esgE:62,esgS:70,esgG:72,marketCap:10000},
+  {code:"2914",name:"JT",sector:"食料品",...gP(3900,.001,.008),per:13.8,pbr:1.9,roe:13.8,divYield:4.8,equityRatio:52,opMargin:28.5,earningsGr:6.5,consDiv:20,esgE:55,esgS:58,esgG:68,marketCap:7800},
+  {code:"4063",name:"信越化学工業",sector:"化学",...gP(5200,.004,.014),per:15.2,pbr:2.3,roe:15.1,divYield:2.2,equityRatio:82,opMargin:32.5,earningsGr:10.5,consDiv:6,esgE:73,esgS:71,esgG:74,marketCap:12000},
+  {code:"9433",name:"KDDI",sector:"情報・通信業",...gP(4600,.001,.006),per:14.2,pbr:1.8,roe:12.7,divYield:3.1,equityRatio:45,opMargin:20.2,earningsGr:5.8,consDiv:22,esgE:71,esgS:73,esgG:77,marketCap:10500},
+  {code:"3382",name:"セブン&アイ",sector:"小売業",...gP(2100,-.003,.012),per:18.0,pbr:1.3,roe:7.2,divYield:2.8,equityRatio:30,opMargin:5.5,earningsGr:-5.2,consDiv:3,esgE:66,esgS:70,esgG:65,marketCap:5000},
+  {code:"6902",name:"デンソー",sector:"輸送用機器",...gP(2100,.004,.015),per:12.8,pbr:1.15,roe:9.0,divYield:2.5,equityRatio:50,opMargin:7.8,earningsGr:9.5,consDiv:4,esgE:78,esgS:72,esgG:70,marketCap:7500},
+  {code:"8766",name:"東京海上HD",sector:"保険業",...gP(3500,.004,.013),per:11.2,pbr:1.65,roe:14.7,divYield:3.3,equityRatio:18,opMargin:18.5,earningsGr:14.2,consDiv:9,esgE:74,esgS:76,esgG:82,marketCap:10000},
+  {code:"4568",name:"第一三共",sector:"医薬品",...gP(4500,.005,.02),per:35.0,pbr:5.2,roe:14.9,divYield:0.8,equityRatio:55,opMargin:18.2,earningsGr:28.5,consDiv:4,esgE:76,esgS:82,esgG:78,marketCap:11000},
+  {code:"6367",name:"ダイキン工業",sector:"機械",...gP(23000,.002,.012),per:28.0,pbr:4.5,roe:16.1,divYield:0.9,equityRatio:52,opMargin:13.5,earningsGr:11.2,consDiv:10,esgE:82,esgS:75,esgG:78,marketCap:8500},
+  {code:"5401",name:"日本製鉄",sector:"鉄鋼",...gP(3200,-.002,.013),per:7.5,pbr:0.65,roe:8.7,divYield:5.0,equityRatio:42,opMargin:9.2,earningsGr:-8.5,consDiv:2,esgE:58,esgS:62,esgG:66,marketCap:3200},
+  {code:"6594",name:"ニデック",sector:"電気機器",...gP(7200,.004,.018),per:30.0,pbr:3.8,roe:12.7,divYield:0.7,equityRatio:45,opMargin:11.5,earningsGr:20.5,consDiv:5,esgE:70,esgS:66,esgG:68,marketCap:4800},
+];
+
+/* ═══ Technical Indicators ═══ */
+const calcMA=(p,n)=>p.length<n?null:p.slice(-n).reduce((a,b)=>a+b,0)/n;
+function calcRSI(p,n=14){if(p.length<n+1)return 50;let g=0,l=0;for(let i=p.length-n;i<p.length;i++){const d=p[i]-p[i-1];if(d>0)g+=d;else l-=d;}return l===0?100:+(100-100/(1+g/l)).toFixed(1);}
+function detectCross(prices,sP=5,lP=25,lb=5){let golden=false,dead=false;if(prices.length<lP+lb)return{golden,dead};for(let i=prices.length-lb;i<prices.length;i++){const pS=calcMA(prices.slice(0,i),sP),pL=calcMA(prices.slice(0,i),lP),cS=calcMA(prices.slice(0,i+1),sP),cL=calcMA(prices.slice(0,i+1),lP);if(pS&&pL&&cS&&cL){if(pS<=pL&&cS>cL)golden=true;if(pS>=pL&&cS<cL)dead=true;}}return{golden,dead};}
+
+/* ═══ Scoring Engine (100pt) with Sell-Risk Discount ═══ */
+function scoreStock(s){
+  const p=s.prices,cur=p[p.length-1],prev=p[p.length-2];
+  const ma5=calcMA(p,5),ma25=calcMA(p,25),ma75=calcMA(p,75);
+  const rsi=calcRSI(p);
+  const avgVol=s.volumes.slice(-25).reduce((a,b)=>a+b,0)/25;
+  const curVol=s.volumes[s.volumes.length-1];
+  const ma25dev=ma25?+((cur-ma25)/ma25*100).toFixed(1):0;
+  const{golden:goldenCross,dead:deadCross}=detectCross(p);
+
+  // Valuation (30pt)
+  let V=0;const vD=[];
+  if(s.per>=5&&s.per<=15){V+=10;vD.push({t:`PER ${s.per}倍：割安圏（5〜15倍）`,s:true});}else if(s.per<=25){V+=5;vD.push({t:`PER ${s.per}倍：適正圏`,s:null});}else{V+=1;vD.push({t:`PER ${s.per}倍：割高圏`,s:false});}
+  if(s.pbr>=0.5&&s.pbr<=1.2){V+=10;vD.push({t:`PBR ${s.pbr}倍：割安圏`,s:true});}else if(s.pbr<=2.5){V+=5;vD.push({t:`PBR ${s.pbr}倍：適正圏`,s:null});}else{V+=1;vD.push({t:`PBR ${s.pbr}倍：割高圏`,s:false});}
+  if(s.divYield>=3){V+=10;vD.push({t:`配当利回り ${s.divYield}%：高配当`,s:true});}else if(s.divYield>=1.5){V+=5;vD.push({t:`配当利回り ${s.divYield}%：標準`,s:null});}else{V+=1;vD.push({t:`配当利回り ${s.divYield}%：低水準`,s:false});}
+
+  // Quality (30pt)
+  let Q=0;const qD=[];
+  if(s.roe>=15){Q+=10;qD.push({t:`ROE ${s.roe}%：高資本効率`,s:true});}else if(s.roe>=8){Q+=7;qD.push({t:`ROE ${s.roe}%：良好`,s:true});}else{Q+=2;qD.push({t:`ROE ${s.roe}%：低水準`,s:false});}
+  if(s.opMargin>=20){Q+=5;qD.push({t:`営業利益率 ${s.opMargin}%：高収益`,s:true});}else if(s.opMargin>=10){Q+=3;qD.push({t:`営業利益率 ${s.opMargin}%：良好`,s:null});}else{Q+=1;qD.push({t:`営業利益率 ${s.opMargin}%：低め`,s:false});}
+  if(s.equityRatio>=40){Q+=5;qD.push({t:`自己資本比率 ${s.equityRatio}%：健全`,s:true});}else if(s.equityRatio>=25){Q+=3;qD.push({t:`自己資本比率 ${s.equityRatio}%：標準`,s:null});}else{Q+=0;qD.push({t:`自己資本比率 ${s.equityRatio}%：要注意`,s:false});}
+  if(s.earningsGr>=10){Q+=5;qD.push({t:`利益成長率 ${s.earningsGr}%：高成長`,s:true});}else if(s.earningsGr>=5){Q+=3;qD.push({t:`利益成長率 ${s.earningsGr}%：成長中`,s:true});}else if(s.earningsGr>=0){Q+=1;qD.push({t:`利益成長率 ${s.earningsGr}%：横ばい`,s:null});}else{Q+=0;qD.push({t:`利益成長率 ${s.earningsGr}%：減益`,s:false});}
+  if(s.consDiv>=3){Q+=5;qD.push({t:`連続増配 ${s.consDiv}年：安定還元`,s:true});}else{Q+=1;qD.push({t:`連続増配 ${s.consDiv}年`,s:null});}
+
+  // Momentum (25pt)
+  let M=0;const mD=[];
+  if(ma25dev>=-5&&ma25dev<=3){M+=8;mD.push({t:`MA25乖離率 ${ma25dev}%：押し目圏`,s:true});}else if(ma25dev>3&&ma25dev<=10){M+=4;mD.push({t:`MA25乖離率 ${ma25dev}%：上昇中`,s:null});}else if(ma25dev<-5){M+=2;mD.push({t:`MA25乖離率 ${ma25dev}%：下落圏`,s:false});}else{M+=1;mD.push({t:`MA25乖離率 ${ma25dev}%：過熱圏`,s:false});}
+  if(goldenCross){M+=7;mD.push({t:"ゴールデンクロス発生（直近5日）",s:true});}else{M+=2;mD.push({t:"ゴールデンクロス未発生",s:null});}
+  if(rsi>=30&&rsi<=55){M+=5;mD.push({t:`RSI ${rsi}：買い適正圏`,s:true});}else if(rsi>55&&rsi<=70){M+=3;mD.push({t:`RSI ${rsi}：やや強め`,s:null});}else if(rsi<30){M+=4;mD.push({t:`RSI ${rsi}：売られ過ぎ`,s:true});}else{M+=0;mD.push({t:`RSI ${rsi}：買われ過ぎ圏`,s:false});}
+  if(curVol>avgVol*1.2){M+=5;mD.push({t:`出来高倍率 ${(curVol/avgVol).toFixed(2)}x：活発`,s:true});}else{M+=2;mD.push({t:`出来高倍率 ${(curVol/avgVol).toFixed(2)}x：通常`,s:null});}
+
+  // ESG (15pt)
+  let E=0;const eD=[];const esgAvg=Math.round((s.esgE+s.esgS+s.esgG)/3);
+  if(esgAvg>=75){E+=6;eD.push({t:`ESG総合 ${esgAvg}：優良`,s:true});}else if(esgAvg>=65){E+=4;eD.push({t:`ESG総合 ${esgAvg}：標準`,s:null});}else{E+=1;eD.push({t:`ESG総合 ${esgAvg}：改善余地あり`,s:false});}
+  E+=s.esgE>=70?3:1;eD.push({t:`環境(E): ${s.esgE}`,s:s.esgE>=70});
+  E+=s.esgS>=70?3:1;eD.push({t:`社会(S): ${s.esgS}`,s:s.esgS>=70});
+  E+=s.esgG>=70?3:1;eD.push({t:`ガバナンス(G): ${s.esgG}`,s:s.esgG>=70});
+
+  const baseTotal=V+Q+M+E;
+
+  // ★ Sell-Risk Discount
+  let sellDiscount=0;const sellRiskFactors=[];
+  if(rsi>=75){sellDiscount+=15;sellRiskFactors.push(`RSI ${rsi}（買われ過ぎ：−15pt）`);}else if(rsi>=70){sellDiscount+=8;sellRiskFactors.push(`RSI ${rsi}（過熱接近：−8pt）`);}
+  if(deadCross){sellDiscount+=12;sellRiskFactors.push("デッドクロス発生（−12pt）");}
+  if(ma25dev>=15){sellDiscount+=12;sellRiskFactors.push(`MA25乖離率 ${ma25dev}%（過熱：−12pt）`);}else if(ma25dev>=10){sellDiscount+=5;sellRiskFactors.push(`MA25乖離率 ${ma25dev}%（やや過熱：−5pt）`);}
+  if(rsi>=65&&ma25dev>=8&&rsi<70&&ma25dev<10){sellDiscount+=5;sellRiskFactors.push("複合過熱（RSI+乖離率：−5pt）");}
+
+  const total=Math.max(0,baseTotal-sellDiscount);
+  const avgV=s.volumes.slice(-25).reduce((a,b)=>a+b,0)/25;
+  const excluded=(s.marketCap||99999)<300||avgV<500000||s.equityRatio<20||s.per<0;
+  return{code:s.code,name:s.name,sector:s.sector,price:cur,prevPrice:prev,change:cur-prev,changePct:+((cur-prev)/prev*100).toFixed(2),baseTotal,sellDiscount,total,V,Q,M,E,vD,qD,mD,eD,sellRiskFactors,rsi,ma5,ma25,ma75,ma25dev,goldenCross,deadCross,excluded,buyCandidate:total>=65&&!excluded,targetProfit:+(cur*1.20).toFixed(0),stopLoss:+(cur*0.92).toFixed(0),holdPeriod:total>=70?"1〜3ヶ月":"3〜6ヶ月"};
+}
+
+/* ═══ Styles ═══ */
+const C={bg:"#070b12",card:"#0d1219",border:"#182033",accent:"#3b82f6",green:"#10b981",red:"#ef4444",amber:"#f59e0b",purple:"#8b5cf6",cyan:"#06b6d4",text:"#e2e8f0",muted:"#64748b",subtle:"#1e293b"};
+const crd={background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:16};
+const btn={border:"none",borderRadius:8,padding:"8px 16px",fontSize:12,fontWeight:600,cursor:"pointer",transition:"all 0.15s",fontFamily:"inherit"};
+const inp={width:"100%",padding:"8px 12px",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,color:C.text,fontSize:13,fontFamily:"'JetBrains Mono',monospace"};
+
+/* ═══ Components ═══ */
+const Badge=({score})=>{let l,c;if(score>=75){l="強い買い";c=C.green;}else if(score>=65){l="買い";c=C.cyan;}else if(score>=50){l="やや買い";c=C.accent;}else if(score>=35){l="中立";c=C.muted;}else{l="見送り";c=C.red;}return React.createElement("span",{style:{fontSize:11,fontWeight:700,color:c,background:`${c}18`,padding:"3px 10px",borderRadius:20,whiteSpace:"nowrap"}},l);};
+const Bar=({v,max,color})=>React.createElement("div",{style:{flex:1,height:5,background:C.border,borderRadius:3,overflow:"hidden"}},React.createElement("div",{style:{width:`${Math.min(100,(v/max)*100)}%`,height:"100%",background:color,borderRadius:3,transition:"width 0.4s"}}));
+const Item=({d})=>React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,padding:"4px 0",fontSize:12,color:C.text,borderBottom:`1px solid ${C.border}`}},React.createElement("span",{style:{color:d.s===true?C.green:d.s===false?C.red:C.muted,fontSize:9}},d.s===true?"▲":d.s===false?"▼":"●"),d.t);
+const Overlay=({children,wide})=>React.createElement("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999}},React.createElement("div",{style:{...crd,width:wide?500:380,padding:22,maxHeight:"90vh",overflowY:"auto"}},children));
+const Lbl=({label,children})=>React.createElement("label",{style:{display:"block",fontSize:11,color:C.muted,marginTop:4}},label,React.createElement("div",{style:{marginTop:3}},children));
+
+/* ═══ Main App ═══ */
+function App(){
+  const[view,setView]=useState("screen");
+  const[detail,setDetail]=useState(null);
+  const[portfolio,setPortfolio]=useState(()=>LS.get("pf3")||[]);
+  const[history,setHistory]=useState(()=>LS.get("hist3")||[]);
+  const[cfg,setCfg]=useState(()=>LS.get("cfg3")||{budget:3000000,maxH:8,apiVersion:"none",apiKey:"",email:"",password:""});
+  const[modal,setModal]=useState(null);
+  const[sort,setSort]=useState("total");
+  const[apiStatus,setApiStatus]=useState({connected:false,error:null,dataSource:"sample"});
+
+  const savePf=(d)=>{setPortfolio(d);LS.set("pf3",d);};
+  const saveHist=(d)=>{setHistory(d);LS.set("hist3",d);};
+  const saveCfg=(d)=>{setCfg(d);LS.set("cfg3",d);};
+
+  const allScored=useMemo(()=>SAMPLE.map(scoreStock),[]);
+  const sorted=useMemo(()=>{const a=[...allScored];a.sort((x,y)=>sort==="V"?y.V-x.V:sort==="Q"?y.Q-x.Q:sort==="M"?y.M-x.M:sort==="E"?y.E-x.E:y.total-x.total);return a;},[allScored,sort]);
+  const buyCandidates=sorted.filter(s=>s.buyCandidate);
+  const perUnit=cfg.maxH>0?Math.floor(cfg.budget/cfg.maxH):0;
+
+  const alerts=useMemo(()=>{
+    const now=Date.now();
+    return portfolio.map(h=>{
+      const sc=allScored.find(x=>x.code===h.code);if(!sc)return null;
+      const days=Math.floor((now-new Date(h.buyDate).getTime())/86400000);
+      if(days<2)return null;
+      const pnl=(sc.price-h.buyPrice)/h.buyPrice*100;const reasons=[];
+      if(pnl>=20)reasons.push("✅ 含み益+20%到達（利確推奨）");
+      if(pnl<=-8)reasons.push("🔻 含み損−8%到達（損切推奨）");
+      if(sc.rsi>=75)reasons.push(`📈 RSI ${sc.rsi}（買われ過ぎ圏）`);
+      if(sc.deadCross)reasons.push("📉 デッドクロス発生");
+      if(sc.ma25dev>=15)reasons.push(`📊 MA25乖離率 ${sc.ma25dev}%（過熱）`);
+      if(days>180&&pnl<5)reasons.push(`⏰ 保有${days}日・含み益${pnl.toFixed(1)}%`);
+      return reasons.length?{...h,reasons,pnl:+pnl.toFixed(2),curPrice:sc.price}:null;
+    }).filter(Boolean);
+  },[portfolio,allScored]);
+
+  const testApi=async()=>{
+    try{setApiStatus(p=>({...p,error:null}));
+      if(cfg.apiVersion==="v2")jqC.configV2(cfg.apiKey);else if(cfg.apiVersion==="v1")await jqC.configV1(cfg.email,cfg.password);else{setApiStatus({connected:false,error:"API方式を選択してください",dataSource:"sample"});return;}
+      await jqC.getList("72030");setApiStatus({connected:true,error:null,dataSource:"J-Quants API"});
+    }catch(e){let m=e.message;if(m.includes("fetch")||m.includes("CORS"))m="CORS制限エラー：ブラウザから直接APIにアクセスできません。ローカルプロキシサーバー経由での接続が必要です。";setApiStatus({connected:false,error:m,dataSource:"sample"});}
+  };
+
+  /* ── Buy Modal ── */
+  const BuyModal=()=>{
+    const s=modal.data;
+    const[shares,setShares]=useState(Math.max(1,Math.floor(perUnit/s.price)));
+    const[price,setPrice]=useState(s.price);
+    const[date,setDate]=useState(new Date().toISOString().slice(0,10));
+    return React.createElement(Overlay,null,
+      React.createElement("h3",{style:{fontSize:15,fontWeight:700,marginBottom:14,color:C.text}},"📝 購入記録："+s.name),
+      React.createElement("div",{style:{display:"grid",gap:10}},
+        React.createElement(Lbl,{label:"購入株数"},React.createElement("input",{type:"number",value:shares,onChange:e=>setShares(+e.target.value),style:inp})),
+        React.createElement(Lbl,{label:"購入単価（円）"},React.createElement("input",{type:"number",value:price,onChange:e=>setPrice(+e.target.value),style:inp})),
+        React.createElement(Lbl,{label:"購入日"},React.createElement("input",{type:"date",value:date,onChange:e=>setDate(e.target.value),style:{...inp,fontFamily:"inherit"}})),
+        React.createElement("div",{style:{fontSize:12,color:C.muted,background:C.bg,borderRadius:6,padding:10}},`投資金額：`,React.createElement("strong",{style:{color:C.text}},"¥"+(shares*price).toLocaleString()))
+      ),
+      React.createElement("div",{style:{display:"flex",gap:8,marginTop:14}},
+        React.createElement("button",{onClick:()=>{savePf([...portfolio,{code:s.code,name:s.name,shares,buyPrice:price,buyDate:date,id:Date.now().toString()}]);setModal(null);},style:{...btn,flex:1,background:C.green,color:"#fff"}},"記録する"),
+        React.createElement("button",{onClick:()=>setModal(null),style:{...btn,flex:1,background:C.subtle,color:C.muted}},"キャンセル")
+      )
+    );
+  };
+
+  /* ── Sell Modal ── */
+  const SellModal=()=>{
+    const h=modal.data;const sc=allScored.find(x=>x.code===h.code);
+    const[sp,setSp]=useState(sc?sc.price:h.buyPrice);
+    const[sd,setSd]=useState(new Date().toISOString().slice(0,10));
+    const pnl=(sp-h.buyPrice)*h.shares;const pnlP=((sp-h.buyPrice)/h.buyPrice*100).toFixed(2);
+    return React.createElement(Overlay,null,
+      React.createElement("h3",{style:{fontSize:15,fontWeight:700,marginBottom:14,color:C.text}},"💰 売却記録："+h.name),
+      React.createElement("div",{style:{display:"grid",gap:10}},
+        React.createElement("div",{style:{fontSize:12,color:C.muted}},`購入: ¥${h.buyPrice.toLocaleString()} × ${h.shares}株`),
+        React.createElement(Lbl,{label:"売却単価（円）"},React.createElement("input",{type:"number",value:sp,onChange:e=>setSp(+e.target.value),style:inp})),
+        React.createElement(Lbl,{label:"売却日"},React.createElement("input",{type:"date",value:sd,onChange:e=>setSd(e.target.value),style:{...inp,fontFamily:"inherit"}})),
+        React.createElement("div",{style:{fontSize:13,background:C.bg,borderRadius:6,padding:10,color:pnl>=0?C.green:C.red,fontWeight:700}},`損益：¥${pnl.toLocaleString()} (${pnl>=0?"+":""}${pnlP}%)`)
+      ),
+      React.createElement("div",{style:{display:"flex",gap:8,marginTop:14}},
+        React.createElement("button",{onClick:()=>{saveHist([...history,{...h,sellPrice:sp,sellDate:sd,pnl,pnlPct:+pnlP}]);savePf(portfolio.filter(p=>p.id!==h.id));setModal(null);},style:{...btn,flex:1,background:pnl>=0?C.green:C.red,color:"#fff"}},"売却を記録"),
+        React.createElement("button",{onClick:()=>setModal(null),style:{...btn,flex:1,background:C.subtle,color:C.muted}},"キャンセル")
+      )
+    );
+  };
+
+  /* ── Settings Modal ── */
+  const SettingsModal=()=>{
+    const[lo,setLo]=useState({...cfg});
+    return React.createElement(Overlay,{wide:true},
+      React.createElement("h3",{style:{fontSize:15,fontWeight:700,marginBottom:14,color:C.text}},"⚙ 設定"),
+      React.createElement("div",{style:{display:"grid",gap:12}},
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},
+          React.createElement(Lbl,{label:"投資可能資金（円）"},React.createElement("input",{type:"number",value:lo.budget,onChange:e=>setLo(s=>({...s,budget:+e.target.value})),style:inp})),
+          React.createElement(Lbl,{label:"最大保有銘柄数"},React.createElement("input",{type:"number",value:lo.maxH,onChange:e=>setLo(s=>({...s,maxH:+e.target.value})),style:inp}))
+        ),
+        React.createElement("div",{style:{fontSize:12,color:C.muted,background:C.bg,borderRadius:6,padding:10}},`1銘柄あたり：`,React.createElement("strong",{style:{color:C.text}},"¥"+(lo.maxH>0?Math.floor(lo.budget/lo.maxH):0).toLocaleString())),
+        React.createElement("div",{style:{borderTop:`1px solid ${C.border}`,paddingTop:12}},
+          React.createElement("div",{style:{fontSize:13,fontWeight:700,color:C.accent,marginBottom:8}},"📡 J-Quants API 接続設定"),
+          React.createElement(Lbl,{label:"API方式"},
+            React.createElement("select",{value:lo.apiVersion,onChange:e=>setLo(s=>({...s,apiVersion:e.target.value})),style:{...inp,fontFamily:"inherit"}},
+              React.createElement("option",{value:"none"},"未接続（サンプルデータ）"),
+              React.createElement("option",{value:"v2"},"V2（APIキー方式）★推奨"),
+              React.createElement("option",{value:"v1"},"V1（メール/パスワード方式）")
+            )
+          ),
+          lo.apiVersion==="v2"&&React.createElement("div",{style:{marginTop:8}},React.createElement(Lbl,{label:"APIキー"},React.createElement("input",{type:"password",value:lo.apiKey,onChange:e=>setLo(s=>({...s,apiKey:e.target.value})),style:inp,placeholder:"your-api-key-here"}))),
+          lo.apiVersion==="v1"&&React.createElement("div",{style:{marginTop:8,display:"grid",gap:8}},React.createElement(Lbl,{label:"メールアドレス"},React.createElement("input",{value:lo.email,onChange:e=>setLo(s=>({...s,email:e.target.value})),style:inp})),React.createElement(Lbl,{label:"パスワード"},React.createElement("input",{type:"password",value:lo.password,onChange:e=>setLo(s=>({...s,password:e.target.value})),style:inp}))),
+          apiStatus.error&&React.createElement("div",{style:{marginTop:8,fontSize:11,color:C.red,background:C.red+"10",borderRadius:6,padding:10,lineHeight:1.7}},apiStatus.error),
+          apiStatus.connected&&React.createElement("div",{style:{marginTop:8,fontSize:11,color:C.green,background:C.green+"10",borderRadius:6,padding:10}},"✅ 接続成功"),
+          React.createElement("div",{style:{marginTop:10,fontSize:10,color:C.muted,background:C.subtle,borderRadius:6,padding:10,lineHeight:1.8}},
+            React.createElement("strong",{style:{color:C.amber}},"⚠ CORS対策について"),React.createElement("br"),
+            "ブラウザから直接 J-Quants API にアクセスする場合、CORS制限によりブロックされる場合があります。",React.createElement("br"),
+            "① ローカルにNode.jsプロキシサーバーを立てる（推奨）",React.createElement("br"),
+            "② サーバー側からAPIを呼び出す構成にする",React.createElement("br"),
+            React.createElement("strong",{style:{color:C.cyan}},"必要プラン："),
+            " Lightプラン以上（月額¥1,650）でリアルタイムデータ取得可能"
+          )
+        )
+      ),
+      React.createElement("div",{style:{display:"flex",gap:8,marginTop:14}},
+        React.createElement("button",{onClick:()=>{saveCfg(lo);if(lo.apiVersion!=="none")testApi();setModal(null);},style:{...btn,flex:1,background:C.accent,color:"#fff"}},"保存"),
+        lo.apiVersion!=="none"&&React.createElement("button",{onClick:()=>{setCfg(lo);testApi();},style:{...btn,background:C.cyan,color:"#fff"}},"接続テスト"),
+        React.createElement("button",{onClick:()=>setModal(null),style:{...btn,background:C.subtle,color:C.muted}},"閉じる")
+      )
+    );
+  };
+
+  /* ── Screen View ── */
+  const ScreenView=()=>React.createElement("div",null,
+    alerts.length>0&&React.createElement("div",{style:{...crd,marginBottom:14,borderColor:C.red+"60",background:"#140808"}},
+      React.createElement("div",{style:{fontSize:13,fontWeight:700,color:C.red,marginBottom:8}},`🔔 売却アラート（${alerts.length}件）`),
+      alerts.map((a,i)=>React.createElement("div",{key:i,style:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:i<alerts.length-1?`1px solid ${C.border}`:"none",flexWrap:"wrap",gap:6}},
+        React.createElement("div",null,
+          React.createElement("span",{style:{fontWeight:600,fontSize:13,color:C.text}},a.code+" "+a.name),
+          React.createElement("span",{style:{fontSize:11,color:a.pnl>=0?C.green:C.red,marginLeft:8}},(a.pnl>=0?"+":"")+a.pnl+"%"),
+          React.createElement("div",{style:{fontSize:11,color:C.amber,marginTop:2}},a.reasons.join("　"))
+        ),
+        React.createElement("button",{onClick:()=>setModal({type:"sell",data:a}),style:{...btn,background:C.red,color:"#fff",fontSize:11}},"売却記録")
+      ))
+    ),
+    React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}},
+      React.createElement("div",null,
+        React.createElement("span",{style:{fontSize:14,fontWeight:700}},"スクリーニング結果"),
+        React.createElement("span",{style:{fontSize:12,color:C.green,marginLeft:8}},`購入候補: ${buyCandidates.length}銘柄`),
+        React.createElement("span",{style:{fontSize:10,color:C.muted,marginLeft:8}},`（${apiStatus.dataSource}）`)
+      ),
+      React.createElement("div",{style:{display:"flex",gap:4,flexWrap:"wrap"}},
+        [{k:"total",l:"総合"},{k:"V",l:"バリュー"},{k:"Q",l:"クオリティ"},{k:"M",l:"モメンタム"},{k:"E",l:"ESG"}].map(s=>
+          React.createElement("button",{key:s.k,onClick:()=>setSort(s.k),style:{...btn,padding:"4px 10px",fontSize:10,background:sort===s.k?C.accent:C.card,color:sort===s.k?"#fff":C.muted,border:`1px solid ${sort===s.k?C.accent:C.border}`}},s.l)
+        )
+      )
+    ),
+    React.createElement("div",{style:{display:"grid",gap:6}},
+      sorted.map(st=>{
+        const held=portfolio.some(p=>p.code===st.code);
+        return React.createElement("div",{key:st.code,onClick:()=>{setDetail(st.code);setView("detail");},style:{...crd,padding:"10px 14px",cursor:"pointer",opacity:st.excluded?0.4:1,borderLeft:st.buyCandidate?`3px solid ${C.green}`:st.excluded?`3px solid ${C.red}`:`3px solid ${C.border}`}},
+          React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
+            React.createElement("div",{style:{minWidth:0,flex:"1 1 160px"}},
+              React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},
+                React.createElement("span",{style:{fontFamily:"mono",fontSize:11,color:C.muted}},st.code),
+                React.createElement("span",{style:{fontSize:13,fontWeight:700}},st.name),
+                held&&React.createElement("span",{style:{fontSize:8,background:C.purple+"30",color:C.purple,padding:"2px 5px",borderRadius:4,fontWeight:600}},"保有中"),
+                st.sellDiscount>0&&React.createElement("span",{style:{fontSize:8,background:C.amber+"20",color:C.amber,padding:"2px 5px",borderRadius:4}},`−${st.sellDiscount}pt`)
+              ),
+              React.createElement("div",{style:{fontSize:10,color:C.muted}},st.sector)
+            ),
+            React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}},
+              React.createElement("div",{style:{textAlign:"right",minWidth:80}},
+                React.createElement("div",{style:{fontFamily:"mono",fontSize:14,fontWeight:700}},"¥"+st.price.toLocaleString()),
+                React.createElement("div",{style:{fontFamily:"mono",fontSize:10,color:st.change>=0?C.green:C.red}},(st.change>=0?"+":"")+st.changePct+"%")
+              ),
+              React.createElement("div",{style:{display:"flex",gap:4}},
+                [{v:st.V,m:30,c:C.accent,l:"V"},{v:st.Q,m:30,c:C.purple,l:"Q"},{v:st.M,m:25,c:C.amber,l:"M"},{v:st.E,m:15,c:C.green,l:"E"}].map(x=>
+                  React.createElement("div",{key:x.l,style:{width:36,textAlign:"center"}},React.createElement("div",{style:{fontSize:7,color:C.muted}},x.l),React.createElement(Bar,{v:x.v,max:x.m,color:x.c}),React.createElement("div",{style:{fontSize:9,fontFamily:"mono",color:x.c}},x.v))
+                )
+              ),
+              React.createElement("div",{style:{textAlign:"center",minWidth:44}},
+                React.createElement("div",{style:{fontSize:18,fontWeight:800,fontFamily:"mono",color:st.total>=65?C.green:st.total>=50?C.accent:C.muted}},st.total),
+                React.createElement("div",{style:{fontSize:8,color:C.muted}},"/100")
+              ),
+              React.createElement(Badge,{score:st.total}),
+              st.buyCandidate&&!held&&React.createElement("button",{onClick:e=>{e.stopPropagation();setModal({type:"buy",data:st});},style:{...btn,background:C.green,color:"#fff",fontSize:10,padding:"6px 10px"}},"購入記録")
+            )
+          )
+        );
+      })
+    )
+  );
+
+  /* ── Detail View ── */
+  const DetailView=()=>{
+    const sc=allScored.find(x=>x.code===detail);if(!sc)return null;
+    const held=portfolio.some(p=>p.code===detail);
+    const Section=({title,details,score,max,color})=>React.createElement("div",{style:crd},
+      React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},
+        React.createElement("span",{style:{fontSize:12,fontWeight:700}},title),
+        React.createElement("span",{style:{fontFamily:"mono",fontSize:15,fontWeight:800,color}},score,React.createElement("span",{style:{fontSize:10,color:C.muted}},"/"+max))
+      ),
+      React.createElement(Bar,{v:score,max:max,color}),
+      React.createElement("div",{style:{marginTop:8}},details.map((d,i)=>React.createElement(Item,{key:i,d})))
+    );
+    return React.createElement("div",null,
+      React.createElement("button",{onClick:()=>setView("screen"),style:{...btn,background:C.subtle,color:C.muted,marginBottom:10}},"← 戻る"),
+      React.createElement("div",{style:{...crd,marginBottom:14}},
+        React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}},
+          React.createElement("div",null,
+            React.createElement("div",{style:{fontFamily:"mono",fontSize:11,color:C.muted}},sc.code+".T　"+sc.sector),
+            React.createElement("div",{style:{fontSize:20,fontWeight:800,margin:"3px 0"}},sc.name),
+            React.createElement("div",{style:{display:"flex",alignItems:"baseline",gap:8}},
+              React.createElement("span",{style:{fontSize:28,fontWeight:800,fontFamily:"mono"}},"¥"+sc.price.toLocaleString()),
+              React.createElement("span",{style:{fontSize:14,fontWeight:700,fontFamily:"mono",color:sc.change>=0?C.green:C.red}},(sc.change>=0?"+":"")+sc.changePct+"%")
+            )
+          ),
+          React.createElement("div",{style:{textAlign:"right"}},
+            React.createElement("div",{style:{fontSize:34,fontWeight:900,fontFamily:"mono",color:sc.total>=65?C.green:sc.total>=50?C.accent:C.muted}},sc.total,React.createElement("span",{style:{fontSize:13,color:C.muted}},"/100")),
+            sc.sellDiscount>0&&React.createElement("div",{style:{fontSize:11,color:C.amber}},`（ベース${sc.baseTotal} − 売却リスク${sc.sellDiscount}pt）`),
+            React.createElement(Badge,{score:sc.total})
+          )
+        )
+      ),
+      sc.sellDiscount>0&&React.createElement("div",{style:{...crd,marginBottom:14,borderColor:C.amber+"40",background:"#1a1408"}},
+        React.createElement("div",{style:{fontSize:12,fontWeight:700,color:C.amber,marginBottom:6}},`⚠ 売却リスクディスカウント（−${sc.sellDiscount}pt）`),
+        React.createElement("div",{style:{fontSize:11,color:C.text,lineHeight:1.8}},"以下の売却基準に近い/到達している状態が検出されたため、購入スコアを減点しています。"),
+        sc.sellRiskFactors.map((f,i)=>React.createElement("div",{key:i,style:{fontSize:11,color:C.amber,padding:"3px 0",display:"flex",alignItems:"center",gap:6}},React.createElement("span",{style:{fontSize:9}},"⚡"),f))
+      ),
+      sc.buyCandidate&&React.createElement("div",{style:{...crd,marginBottom:14,borderColor:C.green+"40",background:"#081a10"}},
+        React.createElement("div",{style:{fontSize:12,fontWeight:700,color:C.green,marginBottom:8}},"📋 購入推奨パラメータ"),
+        React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}},
+          [{l:"推奨投資額",v:`¥${perUnit.toLocaleString()}`},{l:"推奨株数",v:`${Math.floor(perUnit/sc.price)}株`},{l:"想定保有期間",v:sc.holdPeriod},{l:"利確ライン",v:`¥${sc.targetProfit.toLocaleString()}（+20%）`},{l:"損切ライン",v:`¥${sc.stopLoss.toLocaleString()}（−8%）`},{l:"過熱撤退",v:"MA25乖離率+15%超"}].map(x=>
+            React.createElement("div",{key:x.l,style:{background:C.bg,borderRadius:6,padding:8}},React.createElement("div",{style:{fontSize:9,color:C.muted}},x.l),React.createElement("div",{style:{fontSize:12,fontWeight:600,marginTop:2}},x.v))
+          )
+        ),
+        !held&&React.createElement("button",{onClick:()=>setModal({type:"buy",data:sc}),style:{...btn,background:C.green,color:"#fff",width:"100%",marginTop:10,padding:"10px"}},"この銘柄の購入を記録")
+      ),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},
+        React.createElement(Section,{title:"バリュエーション（30pt）",details:sc.vD,score:sc.V,max:30,color:C.accent}),
+        React.createElement(Section,{title:"クオリティ（30pt）",details:sc.qD,score:sc.Q,max:30,color:C.purple}),
+        React.createElement(Section,{title:"モメンタム（25pt）",details:sc.mD,score:sc.M,max:25,color:C.amber}),
+        React.createElement(Section,{title:"ESG（15pt）",details:sc.eD,score:sc.E,max:15,color:C.green})
+      )
+    );
+  };
+
+  /* ── Portfolio View ── */
+  const PortfolioView=()=>{
+    const tI=portfolio.reduce((a,h)=>a+h.buyPrice*h.shares,0);
+    const tC=portfolio.reduce((a,h)=>{const s=allScored.find(x=>x.code===h.code);return a+(s?s.price:h.buyPrice)*h.shares;},0);
+    const tP=tC-tI;const rP=history.reduce((a,t)=>a+(t.pnl||0),0);
+    return React.createElement("div",null,
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}},
+        [{l:"投資総額",v:"¥"+tI.toLocaleString(),c:C.text},{l:"評価額",v:"¥"+tC.toLocaleString(),c:C.text},{l:"含み損益",v:(tP>=0?"+":"")+"¥"+tP.toLocaleString(),c:tP>=0?C.green:C.red},{l:"実現損益",v:(rP>=0?"+":"")+"¥"+rP.toLocaleString(),c:rP>=0?C.green:C.red}].map(x=>
+          React.createElement("div",{key:x.l,style:{...crd,textAlign:"center"}},React.createElement("div",{style:{fontSize:10,color:C.muted,marginBottom:3}},x.l),React.createElement("div",{style:{fontSize:16,fontWeight:700,fontFamily:"mono",color:x.c}},x.v))
+        )
+      ),
+      React.createElement("div",{style:{fontSize:13,fontWeight:700,marginBottom:8}},`保有銘柄（${portfolio.length}件）`),
+      portfolio.length===0?React.createElement("div",{style:{...crd,textAlign:"center",padding:32,color:C.muted}},"スクリーニング画面から購入記録を追加してください"):
+      React.createElement("div",{style:{display:"grid",gap:6}},
+        portfolio.map(h=>{
+          const sc=allScored.find(x=>x.code===h.code);const cp=sc?sc.price:h.buyPrice;const pnl=(cp-h.buyPrice)*h.shares;const pct=((cp-h.buyPrice)/h.buyPrice*100).toFixed(2);const hasA=alerts.some(a=>a.id===h.id);
+          return React.createElement("div",{key:h.id,style:{...crd,padding:"10px 14px",borderLeft:hasA?`3px solid ${C.red}`:`3px solid ${C.border}`}},
+            React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
+              React.createElement("div",{onClick:()=>{setDetail(h.code);setView("detail");},style:{cursor:"pointer"}},
+                React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6}},
+                  React.createElement("span",{style:{fontFamily:"mono",fontSize:11,color:C.muted}},h.code),
+                  React.createElement("span",{style:{fontSize:13,fontWeight:700}},h.name),
+                  hasA&&React.createElement("span",{style:{fontSize:8,background:C.red+"20",color:C.red,padding:"2px 5px",borderRadius:4}},"⚠売却推奨")
+                ),
+                React.createElement("div",{style:{fontSize:10,color:C.muted}},`${h.shares}株 × ¥${h.buyPrice.toLocaleString()} = ¥${(h.shares*h.buyPrice).toLocaleString()}　${h.buyDate}`)
+              ),
+              React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12}},
+                React.createElement("div",{style:{textAlign:"right"}},
+                  React.createElement("div",{style:{fontFamily:"mono",fontSize:14,fontWeight:700}},"¥"+cp.toLocaleString()),
+                  React.createElement("div",{style:{fontFamily:"mono",fontSize:11,color:pnl>=0?C.green:C.red,fontWeight:600}},(pnl>=0?"+":"")+"¥"+pnl.toLocaleString()+` (${pnl>=0?"+":""}${pct}%)`)
+                ),
+                React.createElement("button",{onClick:()=>setModal({type:"sell",data:h}),style:{...btn,background:C.red+"20",color:C.red,fontSize:10}},"売却")
+              )
+            )
+          );
+        })
+      ),
+      history.length>0&&React.createElement(React.Fragment,null,
+        React.createElement("div",{style:{fontSize:13,fontWeight:700,marginTop:18,marginBottom:8}},`取引履歴（${history.length}件）`),
+        React.createElement("div",{style:{display:"grid",gap:5}},
+          history.slice().reverse().map((t,i)=>
+            React.createElement("div",{key:i,style:{...crd,padding:"8px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+              React.createElement("div",null,React.createElement("span",{style:{fontSize:12,fontWeight:600}},t.code+" "+t.name),React.createElement("div",{style:{fontSize:10,color:C.muted}},`${t.buyDate}→${t.sellDate}　${t.shares}株`)),
+              React.createElement("div",{style:{fontFamily:"mono",fontSize:13,fontWeight:700,color:t.pnl>=0?C.green:C.red}},(t.pnl>=0?"+":"")+"¥"+(t.pnl||0).toLocaleString())
+            )
+          )
+        )
+      )
+    );
+  };
+
+  /* ── Main Render ── */
+  return React.createElement("div",null,
+    React.createElement("div",{style:{background:"linear-gradient(135deg,#0c1220,#1a0f30)",borderBottom:`1px solid ${C.border}`,padding:"10px 18px",position:"sticky",top:0,zIndex:100}},
+      React.createElement("div",{style:{maxWidth:1100,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+        React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8}},
+          React.createElement("div",{style:{width:30,height:30,borderRadius:7,background:`linear-gradient(135deg,${C.accent},${C.purple})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}},"📈"),
+          React.createElement("div",null,
+            React.createElement("div",{style:{fontSize:14,fontWeight:800}},"Stock Screener Pro"),
+            React.createElement("div",{style:{fontSize:8,color:C.muted}},"V+Q+M+ESG＝100pt｜売却リスクディスカウント搭載")
+          )
+        ),
+        React.createElement("div",{style:{display:"flex",gap:3}},
+          [{k:"screen",l:"🔍 スクリーニング"},{k:"portfolio",l:"💼 ポートフォリオ"}].map(t=>
+            React.createElement("button",{key:t.k,onClick:()=>setView(t.k),style:{...btn,fontSize:11,background:(view===t.k||(view==="detail"&&t.k==="screen"))?C.accent+"25":"transparent",color:(view===t.k||(view==="detail"&&t.k==="screen"))?C.accent:C.muted,border:`1px solid ${(view===t.k||(view==="detail"&&t.k==="screen"))?C.accent+"50":"transparent"}`}},t.l,t.k==="portfolio"&&alerts.length>0&&React.createElement("span",{style:{marginLeft:4,background:C.red,color:"#fff",fontSize:8,padding:"1px 4px",borderRadius:8}},alerts.length))
+          ),
+          React.createElement("button",{onClick:()=>setModal({type:"settings"}),style:{...btn,background:"transparent",color:C.muted,fontSize:11}},
+            "⚙",apiStatus.connected&&React.createElement("span",{style:{marginLeft:3,width:6,height:6,borderRadius:3,background:C.green,display:"inline-block"}})
+          )
+        )
+      )
+    ),
+    React.createElement("div",{style:{maxWidth:1100,margin:"0 auto",padding:"14px 18px"}},
+      React.createElement("div",{style:{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}},
+        [{l:"対象",v:SAMPLE.length,c:C.text},{l:"購入候補",v:buyCandidates.length,c:C.green},{l:"保有",v:portfolio.length,c:C.purple},{l:"ｱﾗｰﾄ",v:alerts.length,c:alerts.length>0?C.red:C.muted},{l:"1銘柄",v:"¥"+perUnit.toLocaleString(),c:C.accent},{l:"データ",v:apiStatus.dataSource,c:apiStatus.connected?C.green:C.amber}].map(x=>
+          React.createElement("div",{key:x.l,style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:7,padding:"6px 12px",display:"flex",alignItems:"center",gap:6}},
+            React.createElement("span",{style:{fontSize:9,color:C.muted}},x.l),
+            React.createElement("span",{style:{fontSize:12,fontWeight:700,fontFamily:"mono",color:x.c}},x.v)
+          )
+        )
+      ),
+      view==="screen"&&React.createElement(ScreenView),
+      view==="portfolio"&&React.createElement(PortfolioView),
+      view==="detail"&&React.createElement(DetailView),
+      React.createElement("div",{style:{marginTop:18,padding:"10px 14px",background:"#100e1c",borderRadius:8,border:"1px solid #2a2555"}},
+        React.createElement("div",{style:{fontSize:9,color:"#818cf8",fontWeight:600,marginBottom:2}},"⚠ ディスクレーマー"),
+        React.createElement("div",{style:{fontSize:9,color:C.muted,lineHeight:1.8}},"本ツールの売買シグナル・スコアは機械的アルゴリズムによる参考情報であり、投資助言・勧誘には該当しません。実際の投資判断はご自身の責任で行い、必要に応じて金融専門家にご相談ください。ESGスコアは簡易評価であり第三者格付機関の評価とは異なります。")
+      )
+    ),
+    modal&&modal.type==="buy"&&React.createElement(BuyModal),
+    modal&&modal.type==="sell"&&React.createElement(SellModal),
+    modal&&modal.type==="settings"&&React.createElement(SettingsModal)
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
